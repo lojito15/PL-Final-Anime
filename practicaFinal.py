@@ -12,6 +12,7 @@ import numpy as np
 # crear sesion spark
 spark = SparkSession.builder.appName("Practica Final").getOrCreate()
 
+# CARGA Y LIMPIEZA DE DATOS
 # cargar los datos con indicaciones para funcionar correctamente
 # header --> nombres columnas, inferSchema --> detectar tipo de columna, multiline --> manejo de titulos con comas, encoding --> codificacion caracteres, escape --> manejo comillas
 animeCSV = spark.read.csv("anime.csv", header=True, inferSchema=True, multiLine=True, encoding="UTF-8",escape='"')
@@ -79,9 +80,15 @@ animeCSV = animeCSV.withColumn("Score", col("Score").cast("float"))
 animeCSV.show(10)
 
 # limpiar valores nulos (solo se realiza en la columna Score)
+print("Valores nulos:")
+animeCSV.select([count(when(col(c).isNull(), c)).alias(c) for c in animeCSV.columns]).show(truncate=False)
+
 media_score = animeCSV.select(avg("Score")).first()[0]
 print("media:", media_score)
 animeCSV = animeCSV.fillna({"Score": media_score})
+
+print("Valores nulos:")
+animeCSV.select([count(when(col(c).isNull(), c)).alias(c) for c in animeCSV.columns]).show(truncate=False)
 
 # En rating CSV hay que cambiar que rating sea double como en valoraciones
 ratingCSV = ratingCSV.withColumn("rating", col("rating").cast(DoubleType()))
@@ -373,4 +380,43 @@ plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.form
 plt.legend()
 plt.tight_layout()
 plt.show()
+
+# ALGORITMO ALS
+# Entrenamiento
+training, test = ratingsALS.randomSplit([0.8, 0.2])
+als = ALS(maxIter=10, regParam=0.1, userCol="userId", itemCol="itemId", ratingCol="rating", coldStartStrategy="drop")
+model = als.fit(training)
+
+# Predicción
+predictions = model.transform(test)
+rmse = RegressionEvaluator(metricName="rmse", labelCol="rating", predictionCol="prediction").evaluate(predictions)
+print("RMSE =", rmse)
+
+# Recomendaciones usuario 666666
+idUsuario = 666666
+user_df = spark.createDataFrame([(idUsuario,)], ["userId"])
+recs = model.recommendForUserSubset(user_df, 50)
+recs_final = recs.select(explode(col("recommendations")).alias("rec")).select(col("rec.itemId").alias("anime_id"), col("rec.rating").alias("predicted_rating")).join(animeCSV, col("anime_id") == animeCSV.ID, "inner").select(col("anime_id"), col("Name").alias("titulo_original"), col("English_name").alias("titulo_ingles"), col("Type"), col("valoracion_media")).filter(col("Type").isin("movie","tv")).orderBy(col("valoracion_media").desc())
+
+# Guardar recomendaciones en .txt
+ruta_base = "/scripts/recomendaciones_usuario_666666"
+for tipo in ["movie", "tv"]:
+    ruta_tipo = f"{ruta_base}/{tipo}"
+    (
+        recs_final
+        .filter(col("Type") == tipo)
+        .limit(5)
+        .select(concat_ws(" | ", col("anime_id"), col("titulo_original"), col("titulo_ingles"), col("valoracion_media")).alias("value"))
+        .coalesce(1)
+        .write
+        .mode("overwrite")
+        .text(ruta_tipo)
+    )
+
+# Renombrar el archivo .txt part-xxxxx.txt → recomendaciones.txt
+    for file in os.listdir(ruta_tipo):
+        if file.startswith("part-") and file.endswith(".txt"):
+            os.rename(os.path.join(ruta_tipo, file), os.path.join(ruta_tipo, "recomendaciones.txt"))
+
+print("Fin del Algoritmo")
 
